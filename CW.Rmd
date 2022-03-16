@@ -1,0 +1,358 @@
+---
+title: "Coursework for Survival Models"
+author: "Wanting Xu (CID:01508313)"
+output:
+  html_document:
+    df_print: paged
+  html_notebook: default
+  pdf_document: default
+  word_document: default
+---
+
+```{r, include=FALSE}
+options(tinytex.verbose = TRUE)
+```
+
+```{r message=FALSE, warning=FALSE}
+library(survival);library(ggplot2);library(ranger);library(ggfortify);
+library(flexsurv);library(pch);library(dplyr);library(survminer)
+```
+
+## 1.(a)
+ 
+#### Step 1. Generating a data set with 40% censored observations
+```{r}
+S0 <- function(t){
+  pgamma(t, shape = 2, rate = 1.8, lower.tail = FALSE)}
+
+set.seed(109)
+n <- 200
+T.pop <- rgamma(n = n, shape = 2, rate = 1.8) # a data set required to be simulated
+C <- rweibull(n = n,shape = 1,scale = 2) # censoring times
+T.obs <- pmin(T.pop, C)
+D <- ifelse(T.pop <= C, 1, 0)
+table(D) # Check the percentage of censoring
+```
+
+Here, we have 79 '0's in D, $\frac{79}{200}=39.5\%\approx 40\%.$
+
+```{r}
+S.comp <- Surv(time = T.pop, event = rep(1, n))
+S.cens <- Surv(time = T.obs, event = D)
+KM <- survfit(S.cens ~ 1)
+eS <- survfit(S.comp ~ 1)
+survfit(S.cens ~ 1)
+```
+
+In dataset A with 200 samples in total, 79 samples were censored. Among 121 data, median survival time = 0.873.
+
+The **95% confidence interval** for 121
+uncensored individuals is (0.776, 1.05).
+  
+  
+#### Step 2. Plot the Kaplan-Meirer estimate with confidence intervals.
+```{r}
+layout(rbind(1:2))
+curve(S0, 0, 5, col=1, lwd=2, ylab="S(t)", xlab="t"); lines(eS, col=3, lwd=2, conf.int=TRUE)
+title(main="Empirical survival curve", sub="(uncensored data)")
+curve(S0, 0, 5, col=1, lwd=2, ylab="S(t)", xlab="t"); lines(KM, col=4, lwd=2, conf.int=TRUE)
+title(main="Kaplan-Meier survival curve", sub="(right-censored data)")
+```
+
+We observed large jumps for large t.
+ 
+## 1b
+```{r}
+Cb <- T.pop+3 # Generating a time-dependent 'C'
+Db <- ifelse(T.pop <= Cb, 1, 0)
+S.compb <- Surv(time = T.pop, event = rep(1, n))
+S.censb <- Surv(time = pmin(T.pop, Cb), event = D)
+layout(rbind(1:2))
+curve(S0, 0, 5, col=1, lwd=2, ylab="S(t)", xlab="t")
+lines(survfit(S.compb ~ 1), col=3, lwd=2, conf.int=TRUE); title(main="Empirical survival curve")
+curve(S0, 0, 5, col=1, lwd=2, ylab="S(t)", xlab="t")
+lines(survfit(S.censb ~ 1), col=4, lwd=2, conf.int=TRUE); title(main="Kaplan-Meier survival curve")
+```
+ 
+## 1c
+
+Modelling the distribution of step function
+```{r}
+gendat <- function(){n <- 200
+  T.pop <- rgamma(n = n, shape = 2, rate = 1.8)
+  C <- rweibull(n = n,shape = 1,scale = 2)
+  T.obs <- pmin(T.pop, C)
+  D <- ifelse(T.pop <= C, 1, 0)
+  list(X=T.obs, Delta = D)}
+data <-gendat() 
+
+model <- list(
+  validtheta= function(theta) theta>0, # only postive rate
+  h=function(x,theta) rep(theta,length(x)), # hazard func
+  H=function(x,theta) theta*x # integrate from constant to x
+  )
+```
+  
+### Maximum Likelihood Estimation in 1-dim
+Check the log likelihood function
+```{r}
+l <- function(theta,data) {
+  if (!model$validtheta(theta)) return(-Inf)   # checking theta is valid, if not, return -inf
+  sum(log(model$h(data$X[data$Delta==1],theta)))-sum(model$H(data$X,theta))} #picking out all uncensored
+theta <- seq(0,5,by=0.01)
+plot(theta,sapply(theta,function(y) l(y,data)),ylab=expression("log-likelihood"*(theta)),xlab=expression(theta),type="l")
+```
+
+By above graph, we could predict the maximum value appears in $(0.5,1)$.
+ 
+Then we work out the parameter in 1d optimisation.
+```{r}
+o1 <- optim(c(1),fn=function(theta) -l(theta,data), method="Brent",lower=1e-4,upper=1e6, hessian=TRUE)
+o1$par
+```
+-  Par value looks close to the maximum point of the curve.
+-  When tried a larger sample size = 2000, par = 0.773 which is closer to true maximum.
+-  Convergence = 0: we could trust the result. 
+```{r}
+sqrt(solve(o1$hessian)) 
+```
+
+```{r}
+# check whether the result is reasonable. try 1000 times
+thetas <- replicate(1000,{ data <- gendat()
+  optim(c(1),fn=function(theta)-l(theta,data),method="Brent",lower=1e-4,upper=1e6,hessian=TRUE)$par})
+sd(thetas)
+```
+These 2 sd are similar. We can use sd and par to calculate confidence intervals.
+### Calculating 95% confidence intervals
+```{r}
+CI <- o1$par + diag(solve(o1$hessian))*qnorm(c(0.025,0.975))
+CIs <- replicate(10000,{ data <- gendat()
+  o2 <- optim(c(1),fn=function(theta)-l(theta,data),method="Brent",lower=1e-4,upper=1e6,hessian=TRUE)
+  o2$par + sqrt(as.numeric(solve(o2$hessian)))*qnorm(c(0.025,0.975))
+} ) # check
+mean(0.74>=CIs[1,] & 0.74<=CIs[2,])
+```
+95% of these confidence intervals contain the true value. When we try a large n, this ratio is closer to 95%.
+  
+### Modelling with the piecewise step function
+ 
+#### Hazard rate and integrated hazard rate
+I divide dataset into 5 equal intervals.
+```{r}
+# Piecewise step func with constant hazard rate in each time interval
+model <- list( validtheta= function (theta) all(theta>0),
+  h=function(x,theta) 
+    ifelse(x<=KM$time[40], theta[1], ifelse(x<=KM$time[80],theta[2],
+                                                ifelse(x<=KM$time[120],theta[3], ifelse(x<=KM$time[160],theta[4], theta[5])))),
+  # Integrate the hazard rate function
+  H=function(x,theta) 
+    ifelse(x<=KM$time[40], x*theta[1],
+           ifelse(x<=KM$time[80],KM$time[40]*theta[1]+(x-KM$time[40])*theta[2],
+                  ifelse(x<=KM$time[120], KM$time[40]*theta[1]+(KM$time[80]-KM$time[40])*theta[2]+(x-KM$time[80])*theta[3],
+                         ifelse(x<=KM$time[160], KM$time[40]*theta[1]+(KM$time[80]-KM$time[40])*theta[2]+(KM$time[120]-KM$time[80])*theta[3]+(x-KM$time[120])*theta[4],
+                                KM$time[40]*theta[1]+(KM$time[80]-KM$time[40])*theta[2]+(KM$time[120]-KM$time[80])*theta[3]+(KM$time[160]-KM$time[120])*theta[4]+(x-KM$time[160])*theta[5])))))
+```
+  
+#### Optimising the theta in piecewise function
+```{r}
+data <- gendat()
+o5 <- optim(c(1,1,1,1,1),fn=function(theta) -l(theta,data),hessian=TRUE)
+sd <- sqrt(diag(solve(o5$hessian)))
+```
+ 
+#### Confidence intervals in piecewise function
+```{r}
+CIs = list(o5$par[1]+sd[1]*qnorm(c(0.025,0.975)),o5$par[2]+sd[2]*qnorm(c(0.025,0.975)),o5$par[3]+sd[3]*qnorm(c(0.025,0.975)),o5$par[4]+sd[4]*qnorm(c(0.025,0.975)),o5$par[5]+sd[5]*qnorm(c(0.025,0.975)))
+CI1 <- c(CIs[[1]][1],CIs[[2]][1],CIs[[3]][1],CIs[[4]][1],CIs[[5]][1])
+CI2 <- c(CIs[[1]][2],CIs[[2]][2],CIs[[3]][2],CIs[[4]][2],CIs[[5]][2])
+```
+  
+#### Plotting graph
+```{r}
+htrue <- function(t){ hgamma(t,shape = 2, rate = 1.8)} # True hazard
+
+x1 <- c(KM$time[40],KM$time[80],KM$time[120],KM$time[160])
+f1 <- stepfun(x1,o5$par,f=0)
+f_lower <- stepfun(x1,CI1,f=0)
+f_upper <- stepfun(x1,CI2,f=0)
+
+x<-seq(from = 0, to = 1.5, length.out = 1000)
+plot(x,htrue(x),type='l',lty=1,lwd=2,col=4,xlim=c(0,1.5),ylim=c(0,2),xlab="time",ylab='hazard value')
+curve(f1,lty=3,lwd=2,col=1,add=TRUE)
+curve(f_upper,lty=2,lwd=2,col=3,add=TRUE)
+curve(f_lower,lty=2,lwd=2,col=2,add=TRUE)
+legend("bottomright",c("true hazard rate","estimated hazard rate","asymptotic 95% upper CI","asymptotic 95% lower CI"),col=c(4,1,3,2),text.font=1,lty=1:2,cex=0.8)
+title(main="Estimated Piecewise Hazard Rate")
+```
+
+## 2
+
+I use **vereran** dataset from the 'survival' package in R, which is the randomised trial of two treatment regimens for lung cancer.
+<https://www.rdocumentation.org/packages/survival/versions/3.2-13/topics/veteran>
+
+-   trt: '1' = standard, '2' = test
+-   time: days of survival 
+-   diagtime: months from diagnosis 
+-   status: censoring status: '= 1' an observed
+death, '=0' censored data 
+-   karno: performnance status 
+-   prior: '0' no prior therapy, '10' has prior therapy
+
+```{r}
+head(veteran)  #view the data
+veteran$trt <- factor(veteran$trt, labels = c("standard", "test"))
+veteran$prior <- factor(veteran$prior, labels = c("no", "yes"))
+veteran$status <- as.factor(veteran$status)
+# summary(veteran)
+```
+
+The above summary shows, (because of page limit, it doesn't show up)
+
+-   The **range of age** is $[34,81]$.
+-   The diagnosis time is obviously **right skewed**.
+-   $\frac{9}{137}=6.6\%$ observations are censored.
+    $\frac{128}{137}=93.4\%$ of patients died before the end of the study.
+-   $\frac{40}{137}=29.2\%$ patients had a prior therapy.
+ 
+### 1) Survival curves without covariates by Kaplan-Meier analysis
+```{r}
+rm(veteran)
+KMvet <- with(veteran, Surv(time, status))
+vet_fit <- survfit(Surv(time, status) ~ 1, data=veteran)
+ggsurvplot(fit = vet_fit, data = veteran, title = "Overall Survival", font.title = c(15, "bold"), 
+           ggtheme = theme_minimal() + theme(plot.title = element_text(hjust = 0.5, face = "bold")),
+           xlab="Days", ylab = "Survival Probability", font.x=c(12,"bold"), font.y=c(15,"bold"),
+           font.xtickslab=c(8,"plain"), font.ytickslab=c(8,"plain"),
+           censor.shape="|", censor.size = 4, conf.int = TRUE, conf.int.fill = "purple",
+           surv.median.line = "hv", legend.title = "All Patients", legend.labs = "All Patients",
+           risk.table = TRUE, risk.table.height = 0.25, risk.table.fontsize = 4.5)
+```
+
+### 2) Multivariate model by Cox
+```{r}
+cox_mult <- coxph(Surv(time, status) ~ ., data = veteran)
+summary(cox_mult)
+```
+
+-   The 3 p-values are similar. The model is **statistically significant**
+    (p-value \< 0.05).
+-   **Cell type and karno probably are the most significant variables.**
+
+```{r}
+ggsurvplot(survfit(cox_mult, data = veteran), ggtheme = theme_minimal())
+```
+ 
+### 3) Analysis with covariates: treatment
+ 
+This set has right-skewed property as mentioned before.
+ 
+#### Kaplan-Meier analysis for treatment
+```{r}
+KMvet_trt_fit <- survfit(Surv(time, status) ~ trt, data=veteran)
+head(KMvet_trt_fit)
+
+ggsurvplot(KMvet_trt_fit, data = veteran, pval = TRUE, conf.int = TRUE, break.time.by = 150,
+  xlab = "Time in days", ggtheme = theme_light(), risk.table = "abs_pct", risk.table.y.text.col = T,
+  risk.table.y.text = FALSE, ncensor.plot = TRUE, surv.median.line = "hv",  # median survival
+  legend.title = "trt types")
+```
+
+-   p = 0.93: extremly high, there is insufficent evidence to reject $H_0$. So the treatment type doesn't influecne the survival time.
+-   For standard treatment, median survival time = 103 days, while for test treatment, median survival time = 52.5 days (much lower).
+-   However, because of a high p-value, although medians have a large difference, there is no strong evidence to claim curves are different.
+ 
+#### Fitting a Cox Model
+```{r}
+# summary(coxph(Surv(time,status)~trt,data=veteran))
+```
+Because of page limit, the summary doesn't show up
+
+-   $Coef = 0.01774$: test patients have higher risk of death than standard patients.
+-   $exp(coef) = 1.018$: having test treatment increases the hazard by a
+    factor of 1.02.
+-   $[0.714,1.45]$: 95% confidence intervals of hazard ratio.
+
+```{r}
+survreg(Surv(time,status)~trt,data=veteran)
+```
+  
+#### Log-Rank Analysis
+```{r}
+survdiff(Surv(time = veteran$time, event = veteran$status) ~ veteran$trt, data = veteran)
+```
+
+The observed and expected values in both groups of patients are very
+similar. And $p = 0.9 \approx 1.0$
+  
+### 4) Analysis with covariates: cell type
+
+```{r}
+vet_surv <- Surv(time = veteran$time, event = veteran$status)
+vet_celltype <- survfit(vet_surv ~ veteran$celltype, data = veteran)
+summary(vet_celltype, times = c(1, 50, 100*(1:6))) # View data at various periods (600-900 have same value)
+```
+
+```{r}
+ggsurvplot(fit = vet_celltype, data = veteran,
+           title = "Overall Survival analysed by celltypes", font.title = c(15, "bold"),
+           ggtheme = theme_minimal() + theme(plot.title = element_text(hjust = 0.5, face = "bold")),
+           censor = TRUE, censor.shape="|", censor.size = 5, conf.int = TRUE, xlab="Days",
+           surv.median.line = "hv",  ylab = "Survival Probability", font.x=c(12,"bold"), font.y=c(12,"bold"), 
+           font.xtickslab=c(10,"plain"), font.ytickslab=c(10,"plain"), legend = "none", legend.title = "All Patients", 
+           legend.labs = c("Squamous","Small Cell","Adeno","Large"), surv.plot.height = 0.85,
+           risk.table = TRUE, risk.table.height = 0.25, risk.table.fontsize = 3)
+```
+ 
+#### Log-Rank Analysis
+```{r}
+survdiff(Surv(time = veteran$time, event = veteran$status) ~ veteran$celltype, data = veteran)
+```
+
+Patients with Small Cell and Adeno are observed more events than
+expected values, therefore they perform worse than expectation.
+  
+#### Fitting a Cox Model
+```{r}
+coxph(Surv(time = veteran$time, event = veteran$status)  ~ veteran$celltype, data = veteran)
+```
+
+-   The types of small cell and adeno are significant
+-   By the above graph, the area of Large Cell has a better performance,
+    it may good for patients.
+  
+**Aim**: Test whether the treatment is effective in Small Cell Lung
+Cancer. 
+
+**Method**: export the subset, then do a log-rank test or Cox.
+```{r}
+# log-rank test (include=FALSE)
+vet_small <-veteran %>% filter(celltype=="smallcell")
+survdiff(Surv(time = vet_small$time, event = vet_small$status) ~ vet_small$trt, data = vet_small)
+```
+
+```{r}
+# CoxPH analysis
+coxph(Surv(time = vet_small$time, event = vet_small$status) ~ vet_small$trt, data = vet_small)
+```
+
+We could apply same method to test the performance of the treatment for
+other cell types.
+ 
+### 5) Analysis with covariates: age
+
+The median age in the dataset is 62 yrs old. We classified people with $age<62$ *(LT62)* as young people, and others are the olds *(GT62)*.
+```{r}
+vet <- mutate(veteran, AGE = ifelse((age < 62), "age<62", "age>62"), AGE = factor(AGE), trt = factor(trt,labels=c("standard","test")), prior = factor(prior,labels=c("N0","Yes")))
+KM_AGE_fit <- survfit(Surv(time, status) ~ AGE, data=vet)
+autoplot(KM_AGE_fit)
+```
+
+Clearly, the two curves almost overlap in the first 100 days. **Younger patients are more likely to survive more than a year.**
+ 
+### Visualising Hazard Ratios
+
+```{r message=FALSE, warning=FALSE}
+model.vet <- coxph(Surv(time, status) ~ karno + diagtime + age, data = veteran )
+ggforest(model.vet,cpositions = c(0.05, 0.2, 0.4),fontsize = 0.6)
+```
